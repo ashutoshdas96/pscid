@@ -1,6 +1,7 @@
 module Main where
 
 import Prelude
+import Browsersync as BS
 import Data.String as String
 import Node.Process as Process
 import Control.Apply ((*>))
@@ -11,7 +12,7 @@ import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Console (log, CONSOLE)
 import Control.Monad.Eff.Exception (EXCEPTION)
 import Control.Monad.Eff.Random (RANDOM)
-import Control.Monad.Eff.Ref (writeRef, readRef, Ref, newRef, REF)
+import Control.Monad.Eff.Ref (readRef, modifyRef, Ref, newRef, REF)
 import Control.Monad.Reader.Class (ask)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import Control.Monad.ST (runST)
@@ -20,7 +21,8 @@ import Data.Array (concatMap, head, null)
 import Data.Either (isRight, Either(Left, Right), either)
 import Data.Function.Eff (runEffFn2, EffFn2)
 import Data.Functor (($>))
-import Data.Maybe (Maybe(Just, Nothing))
+import Data.Maybe (isJust, Maybe(Just, Nothing))
+import Data.Traversable (sequence)
 import Node.ChildProcess (CHILD_PROCESS)
 import Node.FS (FS)
 import PscIde (sendCommandR, load, cwd, NET)
@@ -37,24 +39,32 @@ import Suggest (applySuggestions)
 
 type Pscid e a = ReaderT (PscidSettings Int) (Eff e) a
 
-newtype State = State { errors ∷ Array PsaError }
+newtype State = State { errors ∷ Array PsaError
+                      , browserSync ∷ Maybe BS.BrowserSync
+                      }
 
-emptyState ∷ State
-emptyState = State { errors: [] }
+emptyState ∷ Maybe BS.BrowserSync -> State
+emptyState browserSync = State { errors: [], browserSync}
 
 main ∷ ∀ e. Eff ( cp ∷ CHILD_PROCESS
                 , console ∷ CONSOLE
+                , browsersync :: BS.BROWSERSYNC
                 , net ∷ NET
                 , avar ∷ AVAR
                 , fs ∷ FS
                 , process ∷ Process.PROCESS
                 , random ∷ RANDOM
                 , ref ∷ REF
-                , err ∷ EXCEPTION | e) Unit
+                , err ∷ EXCEPTION
+                | e) Unit
 main = launchAffVoid do
-  config@{ port, sourceDirectories } ← liftEff optionParser
+  config@{ port, sourceDirectories, webserver } ← liftEff optionParser
   when (null sourceDirectories) (liftEff noSourceDirectoryError)
-  stateRef ← liftEff (newRef emptyState)
+  browserSync <-
+    if webserver then
+      Just <$> BS.startServerAff (BS.Name "pscid") BS.defaultBSConfig
+    else pure Nothing
+  stateRef ← liftEff (newRef (emptyState browserSync))
   liftEff (log "Starting psc-ide-server")
   r ← attempt (startServer' port)
   case r of
@@ -96,7 +106,8 @@ keyHandler
           , net ∷ NET
           , fs ∷ FS, avar ∷ AVAR
           , ref ∷ REF
-          , random ∷ RANDOM | e) Unit
+          , random ∷ RANDOM
+          | e) Unit
 keyHandler stateRef k = do
   {port, buildCommand, testCommand} ← ask
   case k of
@@ -131,9 +142,9 @@ triggerRebuild
   → String
   → Pscid ( cp ∷ CHILD_PROCESS, net ∷ NET
           , console ∷ CONSOLE, fs ∷ FS
-          , ref ∷ REF| e) Unit
+          , ref ∷ REF | e) Unit
 triggerRebuild stateRef file = do
-  {port, testCommand, testAfterRebuild, censorCodes} ← ask
+  {port, testCommand, bundleCommand, testAfterRebuild, censorCodes} ← ask
   let fileName = changeExtension file "purs"
   liftEff ∘ catchLog "We couldn't talk to the server" $ launchAffVoid do
     result ← sendCommandR port (RebuildCmd fileName)
@@ -141,10 +152,16 @@ triggerRebuild stateRef file = do
       Left _ → liftEff (log "We couldn't talk to the server")
       Right errs → liftEff do
         parsedErrors ← handleRebuildResult fileName censorCodes errs
-        writeRef stateRef (State {errors: parsedErrors})
+        State {browserSync} <- readRef stateRef
+        sequence (BS.notify
+                    <$> browserSync
+                    <*> pure "<h1> POW </h1>")
+        modifyRef stateRef \(State s) -> State (s {errors = parsedErrors})
         case head parsedErrors >>= _.suggestion of
           Nothing → pure unit
           Just s → suggestionHint
+        when (isJust browserSync && isRight errs)
+          (execCommand "Bundle" bundleCommand)
         when (testAfterRebuild && isRight errs)
           (execCommand "Test" testCommand)
 

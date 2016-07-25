@@ -22,7 +22,9 @@ type PscidSettings a =
   { port              ∷ a
   , buildCommand      ∷ String
   , testCommand       ∷ String
+  , bundleCommand     ∷ String
   , testAfterRebuild  ∷ Boolean
+  , webserver         ∷ Boolean
   , sourceDirectories ∷ Array String
   , censorCodes       ∷ Array String
   }
@@ -34,7 +36,9 @@ defaultOptions =
   { port: Nothing
   , buildCommand: pulpCmd <> " build"
   , testCommand: pulpCmd <> " test"
+  , bundleCommand: pulpCmd <> " build --to app.js"
   , testAfterRebuild: false
+  , webserver: false
   , sourceDirectories: []
   , censorCodes: []
   }
@@ -59,10 +63,12 @@ mkDefaultOptions ∷ ∀ e. Eff (fs ∷ FS | e) PscidOptions
 mkDefaultOptions =
   defaultOptions { buildCommand = _
                  , testCommand = _
+                 , bundleCommand = _
                  , sourceDirectories = _
                  }
   <$> mkCommand "build"
   <*> mkCommand "test"
+  <*> mkCommand "bundle"
   <*> scanDefaultDirectories
 
 mkCommand ∷ ∀ e. String → Eff (fs ∷ FS | e) String
@@ -85,6 +91,7 @@ optionParser =
      runY setup $ buildOptions
        <$> yarg "p" ["port"] (Just "The Port") (Left "") false
        <*> flag "test" [] (Just "Test project after save")
+       <*> flag "webserver" [] (Just "Start a reloading webserver")
        <*> yarg "I" ["include"]
          (Just "Directories for PureScript source files, separated by `;`")
          (Left "")
@@ -98,10 +105,11 @@ buildOptions
   ∷ ∀ e
   . String
   → Boolean
+  → Boolean
   → String
   → String
   → Eff (fs ∷ FS | e) PscidOptions
-buildOptions port testAfterRebuild includes censor = do
+buildOptions port testAfterRebuild webserver includes censor = do
   defaults ← mkDefaultOptions
   let sourceDirectories =
         if null includes
@@ -110,10 +118,12 @@ buildOptions port testAfterRebuild includes censor = do
       censorCodes = filter (not null) (split "," censor)
   pure { port: fromNumber (readInt 10 port)
        , testAfterRebuild
+       , webserver
        , sourceDirectories
        , censorCodes
        , buildCommand: defaults.buildCommand
        , testCommand: defaults.testCommand
+       , bundleCommand: defaults.bundleCommand
        }
 
 foreign import hasNamedScript ∷ ∀ e. String → Eff (fs ∷ FS | e) Boolean
