@@ -4,6 +4,7 @@ import Prelude
 import Browsersync as BS
 import Data.String as String
 import Node.Process as Process
+import Ansi.Codes (Color(Green))
 import Control.Apply ((*>))
 import Control.Monad.Aff (runAff, later', attempt)
 import Control.Monad.Aff.AVar (AVAR)
@@ -21,17 +22,17 @@ import Data.Array (concatMap, head, null)
 import Data.Either (isRight, Either(Left, Right), either)
 import Data.Function.Eff (runEffFn2, EffFn2)
 import Data.Functor (($>))
-import Data.Maybe (isJust, Maybe(Just, Nothing))
-import Data.Traversable (sequence)
+import Data.Maybe (Maybe(Just, Nothing))
+import Data.Traversable (sequence_)
 import Node.ChildProcess (CHILD_PROCESS)
 import Node.FS (FS)
 import PscIde (sendCommandR, load, cwd, NET)
 import PscIde.Command (Command(RebuildCmd), Message(Message))
-import Pscid.Console (owl, clearConsole, suggestionHint, startScreen)
+import Pscid.Console (logColored, owl, clearConsole, suggestionHint, startScreen)
 import Pscid.Error (catchLog, noSourceDirectoryError)
 import Pscid.Keypress (Key(Key), onKeypress, initializeKeypresses)
 import Pscid.Options (PscidSettings, optionParser)
-import Pscid.Process (execCommand)
+import Pscid.Process (execCommandAff, execCommand)
 import Pscid.Psa (filterWarnings, PsaError, parseErrors, psaPrinter)
 import Pscid.Server (restartServer, startServer', stopServer')
 import Pscid.Util (launchAffVoid, both, (∘))
@@ -150,19 +151,30 @@ triggerRebuild stateRef file = do
     result ← sendCommandR port (RebuildCmd fileName)
     case result of
       Left _ → liftEff (log "We couldn't talk to the server")
-      Right errs → liftEff do
-        parsedErrors ← handleRebuildResult fileName censorCodes errs
-        State {browserSync} <- readRef stateRef
-        sequence (BS.notify
-                    <$> browserSync
-                    <*> pure "<h1> POW </h1>")
-        modifyRef stateRef \(State s) -> State (s {errors = parsedErrors})
-        case head parsedErrors >>= _.suggestion of
-          Nothing → pure unit
-          Just s → suggestionHint
-        when (isJust browserSync && isRight errs)
-          (execCommand "Bundle" bundleCommand)
-        when (testAfterRebuild && isRight errs)
+      Right errs → do
+        liftEff do
+          parsedErrors ← handleRebuildResult fileName censorCodes errs
+          -- sequence (BS.notify
+          --             <$> browserSync
+          --             <*> pure "<h1> POW </h1>")
+          modifyRef stateRef \(State s) -> State (s {errors = parsedErrors})
+          case head parsedErrors >>= _.suggestion of
+            Nothing → pure unit
+            Just s → suggestionHint
+        -- Bundling and reloading the browser
+        State {browserSync} <- liftEff (readRef stateRef)
+        case browserSync, errs of
+          Nothing, _ -> pure unit
+          Just bs, Left es -> liftEff do
+            sequence_ (BS.notify
+                        <$> browserSync
+                        <*> pure (show es))
+          Just bs, Right _ -> do
+            {code} <- execCommandAff "Bundle" bundleCommand
+            when (code == 0) $ liftEff do
+              logColored Green "Bundling successful!"
+              sequence_ (BS.reload <$> browserSync)
+        liftEff $ when (testAfterRebuild && isRight errs)
           (execCommand "Test" testCommand)
 
 changeExtension :: String -> String -> String
